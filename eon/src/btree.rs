@@ -42,12 +42,11 @@ pub enum Tree<T: Item> {
 pub enum Node<T: Item> {
     Internal {
         height: u8,
-        summary: T::Summary,
         child_summaries: SmallVec<[T::Summary; 2 * TREE_BASE]>,
         child_trees: SmallVec<[Tree<T>; 2 * TREE_BASE]>,
     },
     Leaf {
-        summary: T::Summary,
+        item_summaries: SmallVec<[T::Summary; 2 * TREE_BASE]>,
         items: SmallVec<[T; 2 * TREE_BASE]>,
     },
 }
@@ -74,7 +73,7 @@ pub struct NullNodeStore<T: Item>(PhantomData<T>);
 impl<T: Item> Tree<T> {
     pub fn new() -> Self {
         Tree::Resident(Arc::new(Node::Leaf {
-            summary: T::Summary::default(),
+            item_summaries: SmallVec::new(),
             items: SmallVec::new(),
         }))
     }
@@ -111,10 +110,7 @@ impl<T: Item> Tree<T> {
         S: NodeStore<T>,
         D: Dimension<Summary = T::Summary>,
     {
-        match *self.node(db)? {
-            Node::Internal { ref summary, .. } => Ok(D::from_summary(summary).clone()),
-            Node::Leaf { ref summary, .. } => Ok(D::from_summary(summary).clone()),
-        }
+        Ok(D::from_summary(self.node(db)?.summary()).clone())
     }
 
     pub fn insert<D, S>(
@@ -151,7 +147,7 @@ impl<T: Item> Tree<T> {
 
             if leaf.is_none() {
                 leaf = Some(Node::Leaf::<T> {
-                    summary: T::Summary::default(),
+                    item_summaries: SmallVec::new(),
                     items: SmallVec::new(),
                 });
             }
@@ -172,7 +168,7 @@ impl<T: Item> Tree<T> {
         self.push_tree(
             Tree::from_child_trees(
                 vec![Tree::Resident(Arc::new(Node::Leaf {
-                    summary: item.summarize(),
+                    item_summaries: SmallVec::from_vec(vec![item.summarize()]),
                     items: SmallVec::from_vec(vec![item]),
                 }))],
                 db,
@@ -204,12 +200,10 @@ impl<T: Item> Tree<T> {
         match self.make_mut_node(db)? {
             Node::Internal {
                 height,
-                summary,
                 child_summaries,
                 child_trees,
             } => {
                 let other_node = other.node(db)?;
-                *summary += other_node.summary();
 
                 let height_delta = *height - other_node.height();
                 let mut summaries_to_append = SmallVec::<[T::Summary; 2 * TREE_BASE]>::new();
@@ -239,33 +233,43 @@ impl<T: Item> Tree<T> {
                     }
                 }
 
+                for summary_to_append in &mut summaries_to_append {
+                    let mut summary = child_summaries.last().unwrap().clone();
+                    summary += summary_to_append;
+                    *summary_to_append = summary;
+                }
+
                 let child_count = child_trees.len() + trees_to_append.len();
                 if child_count > 2 * TREE_BASE {
                     let left_summaries: SmallVec<_>;
-                    let right_summaries: SmallVec<_>;
-                    let left_trees;
-                    let right_trees;
+                    let mut right_summaries: SmallVec<_>;
+                    let left_trees: SmallVec<_>;
+                    let right_trees: SmallVec<[Tree<T>; 2 * TREE_BASE]>;
 
                     let midpoint = (child_count + child_count % 2) / 2;
                     {
-                        let mut all_summaries = child_summaries
-                            .iter()
-                            .chain(summaries_to_append.iter())
-                            .cloned();
-                        left_summaries = all_summaries.by_ref().take(midpoint).collect();
-                        right_summaries = all_summaries.collect();
                         let mut all_trees =
                             child_trees.iter().chain(trees_to_append.iter()).cloned();
                         left_trees = all_trees.by_ref().take(midpoint).collect();
                         right_trees = all_trees.collect();
+
+                        let mut all_summaries = child_summaries
+                            .iter()
+                            .chain(summaries_to_append.iter())
+                            .cloned();
+                        left_summaries = all_summaries.take(midpoint).collect();
+                        right_summaries = SmallVec::new();
+                        let mut right_summary = T::Summary::default();
+                        for tree in &right_trees {
+                            right_summary += tree.node(db)?.summary();
+                            right_summaries.push(right_summary.clone());
+                        }
                     }
-                    *summary = sum(left_summaries.iter());
                     *child_summaries = left_summaries;
                     *child_trees = left_trees;
 
                     Ok(Some(Tree::Resident(Arc::new(Node::Internal {
                         height: *height,
-                        summary: sum(right_summaries.iter()),
                         child_summaries: right_summaries,
                         child_trees: right_trees,
                     }))))
@@ -275,8 +279,19 @@ impl<T: Item> Tree<T> {
                     Ok(None)
                 }
             }
-            Node::Leaf { summary, items, .. } => {
+            Node::Leaf {
+                item_summaries,
+                items,
+                ..
+            } => {
                 let other_node = other.node(db)?;
+
+                let mut summaries_to_append =
+                    other_node.item_summaries().iter().map(|summary_to_append| {
+                        let mut summary = item_summaries.last().unwrap().clone();
+                        summary += summary_to_append;
+                        *summary_to_append = summary;
+                    });
 
                 let child_count = items.len() + other_node.items().len();
                 if child_count > 2 * TREE_BASE {
@@ -290,13 +305,11 @@ impl<T: Item> Tree<T> {
                         right_items = all_items.collect();
                     }
                     *items = left_items;
-                    *summary = sum_owned(items.iter().map(|item| item.summarize()));
                     Ok(Some(Tree::Resident(Arc::new(Node::Leaf {
                         summary: sum_owned(right_items.iter().map(|item| item.summarize())),
                         items: right_items,
                     }))))
                 } else {
-                    *summary += other_node.summary();
                     items.extend(other_node.items().iter().cloned());
                     Ok(None)
                 }
@@ -309,14 +322,14 @@ impl<T: Item> Tree<T> {
         S: NodeStore<T>,
     {
         let height = child_trees[0].node(db)?.height() + 1;
+        let mut summary = T::Summary::default();
         let mut child_summaries = SmallVec::new();
         for child in &child_trees {
-            child_summaries.push(child.node(db)?.summary().clone());
+            summary += child.node(db)?.summary();
+            child_summaries.push(summary.clone());
         }
-        let summary = sum(child_summaries.iter());
         Ok(Tree::Resident(Arc::new(Node::Internal {
             height,
-            summary,
             child_summaries,
             child_trees: SmallVec::from_vec(child_trees),
         })))
@@ -378,7 +391,9 @@ impl<T: Item> Node<T> {
 
     fn summary(&self) -> &T::Summary {
         match self {
-            Node::Internal { summary, .. } => summary,
+            Node::Internal {
+                child_summaries, ..
+            } => child_summaries.last().unwrap(),
             Node::Leaf { summary, .. } => summary,
         }
     }
@@ -415,8 +430,8 @@ impl<T: Item> Node<T> {
 
     fn summary_mut(&mut self) -> &mut T::Summary {
         match self {
-            Node::Internal { summary, .. } => summary,
             Node::Leaf { summary, .. } => summary,
+            Node::Internal { .. } => panic!(),
         }
     }
 
@@ -433,12 +448,10 @@ impl<T: Item> Clone for Node<T> {
         match self {
             Node::Internal {
                 height,
-                summary,
                 child_summaries,
                 child_trees,
             } => Node::Internal {
                 height: *height,
-                summary: summary.clone(),
                 child_summaries: child_summaries.clone(),
                 child_trees: child_trees.clone(),
             },

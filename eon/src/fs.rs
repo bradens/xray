@@ -925,8 +925,7 @@ mod tests {
     fn test_builder_random() {
         use std::iter::FromIterator;
 
-        for seed in 0..100 {
-            // let seed = 908;
+        for seed in 0..1 {
             println!("SEED: {}", seed);
             let mut rng = StdRng::from_seed(&[seed]);
 
@@ -957,8 +956,8 @@ mod tests {
                 );
 
                 // println!("=========================================");
-                // println!("existing paths {:#?}", tree.paths(store));
-                // println!("new tree paths {:#?}", reference_tree.paths());
+                // println!("existing paths {:#?}", tree.paths(store).len());
+                // println!("new tree paths {:#?}", reference_tree.paths().len());
                 // println!("=========================================");
 
                 let mut builder = Builder::new(tree.clone(), store).unwrap();
@@ -1029,7 +1028,7 @@ mod tests {
         );
     }
 
-    const MAX_TEST_TREE_DEPTH: usize = 5;
+    const MAX_TEST_TREE_DEPTH: usize = 14;
 
     #[derive(Clone, Debug, Ord, PartialOrd, Eq, PartialEq)]
     enum TestEntry {
@@ -1154,7 +1153,7 @@ mod tests {
                 if depth < MAX_TEST_TREE_DEPTH {
                     let mut blacklist = dir_entries.iter().map(|d| d.name().clone()).collect();
                     for _ in 0..rng.gen_range(0, 5) {
-                        let moved_entry = if rng.gen_weighted_bool(4) {
+                        let moved_entry = if rng.gen_weighted_bool(5) {
                             Self::move_entry(rng, path, moves, &mut blacklist, inserted_paths)
                         } else {
                             None
@@ -1247,7 +1246,7 @@ mod tests {
     fn gen_name<T: Rng>(rng: &mut T, blacklist: &mut HashSet<OsString>) -> OsString {
         loop {
             let mut name = String::new();
-            for _ in 0..rng.gen_range(1, 4) {
+            for _ in 0..rng.gen_range(1, 6) {
                 name.push(rng.gen_range(b'a', b'z' + 1).into());
             }
             let name = OsString::from(name);
